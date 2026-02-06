@@ -1,3 +1,4 @@
+import javax.xml.crypto.Data;
 import java.io.IOException;
 import java.net.DatagramPacket;
 import java.net.DatagramSocket;
@@ -9,44 +10,46 @@ import java.util.Map;
 
 public class Switch {
 
-    private static int getIncomingSwitchPort(DatagramPacket frame,
+    private static String getIncomingSwitchPort(DatagramPacket frame,
                                              List<String> neighbors,
-                                             Config config,
-                                             Map<String, Integer> neighborToSwitchPort) {
+                                             Config config) {
 
         int source_UDP_port = frame.getPort();
 
         for (String neighborID: neighbors) {
             InetSocketAddress neighbor_address = config.addresses.get(neighborID);
             if (neighbor_address != null && neighbor_address.getPort() == source_UDP_port) {
-                return neighborToSwitchPort.get(neighborID);
+                return neighborID;
             }
         }
-        return -1;
+        return null;
     }
 
-    private static void sendOutPort(String frame_data,
-                                    int out_port,
-                                    Map<Integer, String> switchPortToNeighbor,
-                                    Config config,
-                                    DatagramSocket socket) throws IOException {
+    private static String addressToPortString(InetSocketAddress address) {
+        return address.getAddress().getHostAddress() + ":" + address.getPort();
+    }
 
-        String neighborID = switchPortToNeighbor.get(out_port);
-
-        if (neighborID == null) {
-            return;
-        }
+    private static void sendToNeighbor(String frame_data,
+                                       String neighborID,
+                                       Config config,
+                                       DatagramSocket socket) throws IOException {
 
         InetSocketAddress address = config.addresses.get(neighborID);
 
-        if (address == null) {
-            return;
-        }
-
-        byte[] content = frame_data.getBytes();
-        DatagramPacket packet = new DatagramPacket(content, content.length, address.getAddress(), address.getPort());
+        byte[] data = frame_data.getBytes();
+        DatagramPacket packet = new DatagramPacket(data, data.length, address.getAddress(), address.getPort());
         socket.send(packet);
 
+    }
+
+    private static String neighborForPortString(String portString,
+                                                Map<String, String> neighborToPortString) {
+        for (Map.Entry<String, String> entry : neighborToPortString.entrySet()) {
+            if (entry.getValue().equals(portString)) {
+                return entry.getKey();
+            }
+        }
+        return null;
     }
 
     public static void main(String[] args) throws IOException {
@@ -56,7 +59,7 @@ public class Switch {
             return;
         }
 
-        Map<String, Integer> switch_table = new HashMap<>();
+        Map<String, String> switch_table = new HashMap<>();
 
         String switch_name = args[0];
 
@@ -76,15 +79,15 @@ public class Switch {
             return;
         }
 
-        Map<String, Integer> neighborToSwitchPort = new HashMap<>();
-        Map<Integer, String> switchPortToNeighbor = new HashMap<>();
+        Map<String, String> neighborToPortString = new HashMap<>();
 
-        for (int i = 0; i < neighbors.size(); i++) {
-            int port = i + 1;
-            String neighborID = neighbors.get(i);
-
-            neighborToSwitchPort.put(neighborID, port);
-            switchPortToNeighbor.put(port, neighborID);
+        for (String neighborID : neighbors) {
+            InetSocketAddress address = config.addresses.get(neighborID);
+            if (address == null) {
+                System.out.println("Error neighbor has no address info");
+                return;
+            }
+            neighborToPortString.put(neighborID, addressToPortString(address));
         }
 
         DatagramSocket socket = new DatagramSocket(switch_address.getPort());
@@ -101,22 +104,27 @@ public class Switch {
             String source_Mac = parts[0];
             String destination_Mac = parts[1];
 
-            int inPort = getIncomingSwitchPort(frame, neighbors, config, neighborToSwitchPort);
+            String inNeighbor = getIncomingSwitchPort(frame, neighbors, config);
+            String inPortString = neighborToPortString.get(inNeighbor);
 
-            boolean tableChanged = (!switch_table.containsKey(source_Mac) || (switch_table.get(source_Mac) != inPort));
-            switch_table.put(source_Mac, inPort);
+            boolean tableChanged = (!switch_table.containsKey(source_Mac) || (!switch_table.get(source_Mac).equals(inPortString)));
+            switch_table.put(source_Mac, inPortString);
 
             if (tableChanged) {
                 System.out.println("Switch Table: " + switch_table);
             }
 
             if (switch_table.containsKey(destination_Mac)) {
-                int outPort = switch_table.get(destination_Mac);
-                if (outPort != inPort) {
-                    sendOutPort(frame_data, outPort, switchPortToNeighbor, config, socket);
+                String outPortString = switch_table.get(destination_Mac);
+                if (!outPortString.equals(inPortString)) {
+                    String outNeighbor = neighborForPortString(outPortString, neighborToPortString);
+
+                    if (outNeighbor != null) {
+                        sendToNeighbor(frame_data, outNeighbor, config, socket);
+                    }
                 }
             } else {
-                flood(frame_data, inPort, switchPortToNeighbor, config, socket);
+                flood(frame_data, inPortString, neighborToPortString, neighbors, config, socket);
             }
 
             System.out.println();
@@ -125,30 +133,18 @@ public class Switch {
     }
 
     public static void flood(String frame_data,
-                             int inPort,
-                             Map<Integer, String> switchPortToNeighbor,
+                             String inPortString,
+                             Map<String, String> neighborToPortString,
+                             List<String> neighbors,
                              Config config,
                              DatagramSocket socket) throws IOException {
 
-        byte[] data = frame_data.getBytes();
-
-        for (Map.Entry<Integer, String> entry : switchPortToNeighbor.entrySet()) {
-            int port = entry.getKey();
-
-            if (port == inPort) {
+        for (String neighborID : neighbors) {
+            String neighborPortString = neighborToPortString.get(neighborID);
+            if (neighborPortString != null && neighborPortString.equals(inPortString)) {
                 continue;
             }
-
-            String neighborID = entry.getValue();
-            InetSocketAddress address = config.addresses.get(neighborID);
-
-            if (address == null) {
-                continue;
-            }
-
-            DatagramPacket packet = new DatagramPacket(data, data.length, address.getAddress(), address.getPort());
-            socket.send(packet);
-
+            sendToNeighbor(frame_data, neighborID, config, socket);
         }
     }
 }
